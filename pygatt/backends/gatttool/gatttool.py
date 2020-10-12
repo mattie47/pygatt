@@ -523,9 +523,9 @@ class GATTToolBackend(BLEBackend):
         while not self._characteristics and time.time() < max_time:
             time.sleep(.5)
 
-        # Sleep one extra second in case we caught characteristic
+        # Sleep two extra seconds in case we caught characteristic
         # in the middle
-        time.sleep(1)
+        time.sleep(2)
 
         if not self._characteristics:
             raise NotConnectedError("Characteristic discovery failed")
