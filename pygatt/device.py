@@ -31,8 +31,8 @@ class BLEDevice(object):
         self._address = address
         self._characteristics = {}
         self._callbacks = defaultdict(set)
+        self._disconnect_callback = None
         self._subscribed_handlers = {}
-        self._subscribed_uuids = {}
         self._lock = threading.Lock()
 
     def bond(self, permanent=False):
@@ -78,84 +78,27 @@ class BLEDevice(object):
         """
         raise NotImplementedError()
 
-    def char_read_long(self, uuid):
-        """
-        Reads a Characteristic by UUID.
-
-        uuid -- UUID of Characteristic to read as a string.
-
-        Returns a bytearray containing the characteristic value on success.
-
-        Example:
-            my_ble_device.char_read('a1e8f5b1-696b-4e4c-87c6-69dfe0b0093b')
-        """
-        raise NotImplementedError()
-
-    def char_read_long_handle(self, handle):
-        """
-        Reads a Characteristic longer than one read by handle.
-
-        handle -- handle of Characteristic to read.
-
-        Returns a bytearray containing the characteristic value on success.
-
-        Example:
-            my_ble_device.char_read_long_handle(5)
-        """
-        raise NotImplementedError()
-
-    def char_write(self, uuid, value, wait_for_response=True):
+    def char_write(self, uuid, value, wait_for_response=False, no_response=False):
         """
         Writes a value to a given characteristic UUID.
 
         uuid -- the UUID of the characteristic to write to.
         value -- a bytearray to write to the characteristic.
-        wait_for_response -- wait for response after writing. A GATT "command"
-            is used when not waiting for a response. The remote host will not
-            acknowledge the write.
+        wait_for_response -- wait for response after writing.
 
         Example:
             my_ble_device.char_write('a1e8f5b1-696b-4e4c-87c6-69dfe0b0093b',
                                      bytearray([0x00, 0xFF]))
         """
         return self.char_write_handle(self.get_handle(uuid), value,
-                                      wait_for_response=wait_for_response)
+                                      wait_for_response=wait_for_response, no_response=no_response)
 
-    def char_write_handle(self, handle, value, wait_for_response=True):
+    def char_write_handle(self, handle, value, wait_for_response=False, no_response=False):
         """
         Writes a value to a given characteristic handle. This can be used to
         write to the characteristic config handle for a primary characteristic.
 
-        hande -- the handle to write to.
-        value -- a bytearray to write to the characteristic.
-        wait_for_response -- wait for response after writing.
-
-        Example:
-            my_ble_device.char_write_handle(42, bytearray([0x00, 0xFF]))
-        """
-        raise NotImplementedError()
-
-    def char_write_long(self, uuid, value, wait_for_response=False):
-        """
-        Writes a value to a given characteristic UUID.
-
-        uuid -- the UUID of the characteristic to write to.
-        value -- a bytearray to write to the characteristic.
-        wait_for_response -- wait for response after writing.
-
-        Example:
-            my_ble_device.char_write('a1e8f5b1-696b-4e4c-87c6-69dfe0b0093b',
-                                     bytearray([0x00, 0xFF]))
-        """
-        return self.char_write_long_handle(self.get_handle(uuid), value,
-                                           wait_for_response=wait_for_response)
-
-    def char_write_long_handle(self, handle, value, wait_for_response=False):
-        """
-        Writes a value to a given characteristic handle. This can be used to
-        write to the characteristic config handle for a primary characteristic.
-
-        hande -- the handle to write to.
+        handle -- the handle to write to.
         value -- a bytearray to write to the characteristic.
         wait_for_response -- wait for response after writing.
 
@@ -173,22 +116,7 @@ class BLEDevice(object):
         """
         raise NotImplementedError()
 
-    def _notification_handles(self, uuid):
-        # Expect notifications on the value handle...
-        value_handle = self.get_handle(uuid)
-
-        # but write to the characteristic config to enable notifications
-        # TODO with the BGAPI backend we can be smarter and fetch the actual
-        # characteristic config handle - we can also do that with gattool if we
-        # use the 'desc' command, so we'll need to change the "get_handle" API
-        # to be able to get the value or characteristic config handle.
-        characteristic_config_handle = value_handle + 1
-
-        return value_handle, characteristic_config_handle
-
-    def subscribe(self, uuid, callback=None, indication=False,
-                  wait_for_response=True):
-
+    def subscribe(self, uuid, callback=None, indication=False):
         """
         Enable notifications or indications for a characteristic and register a
         callback function to be called whenever a new value arrives.
@@ -198,13 +126,26 @@ class BLEDevice(object):
                     received on this characteristic.
         indication -- use indications (where each notificaiton is ACKd). This is
                       more reliable, but slower.
-        wait_for_response -- wait for response after subscription.
-
         """
 
-        value_handle, characteristic_config_handle = (
-            self._notification_handles(uuid)
-        )
+        value_handle = self.get_handle(uuid)
+        self.subscribe_handle(value_handle, callback=callback, indication=indication)
+
+    def unsubscribe(self, uuid):
+        """
+        Disable notification for a characteristic and de-register the callback.
+        """
+
+        value_handle = self.get_handle(uuid)
+        self.unsubscribe_handle(value_handle)
+
+    def subscribe_handle(self, handle, callback=None, indication=False):
+        """
+        Like subscribe() but using handle instead of uuid.
+        handle -- handle as a integer of the characteristic to subscribe.
+        """
+        value_handle = handle
+        characteristic_config_handle = value_handle + 1
 
         properties = bytearray([
             0x2 if indication else 0x1,
@@ -219,27 +160,24 @@ class BLEDevice(object):
                 self.char_write_handle(
                     characteristic_config_handle,
                     properties,
-                    wait_for_response=wait_for_response
+                    wait_for_response=False
                 )
-                log.info("Subscribed to uuid=%s", uuid)
+                log.info("Subscribed to handle=0x%04x", value_handle)
                 self._subscribed_handlers[value_handle] = properties
-                self._subscribed_uuids[uuid] = indication
             else:
-                log.debug("Already subscribed to uuid=%s", uuid)
+                log.debug("Already subscribed to handle=0x%04x", value_handle)
 
-    def unsubscribe(self, uuid, wait_for_response=True):
+    def unsubscribe_handle(self, handle):
         """
-        Disable notification for a charecteristic and de-register the callback.
+        Like unsubscribe() but using handle instead of uuid.
+        handle -- handle as a integer of the characteristic to unsubscribe.
         """
-        value_handle, characteristic_config_handle = (
-            self._notification_handles(uuid)
-        )
+        value_handle = handle
+        characteristic_config_handle = value_handle + 1
 
         properties = bytearray([0x0, 0x0])
 
         with self._lock:
-            if uuid in self._subscribed_uuids:
-                del(self._subscribed_uuids[uuid])
             if value_handle in self._callbacks:
                 del(self._callbacks[value_handle])
             if value_handle in self._subscribed_handlers:
@@ -247,11 +185,14 @@ class BLEDevice(object):
                 self.char_write_handle(
                     characteristic_config_handle,
                     properties,
-                    wait_for_response=wait_for_response
+                    wait_for_response=False
                 )
-                log.info("Unsubscribed from uuid=%s", uuid)
+                log.info("Unsubscribed from handle=0x%04x", value_handle)
             else:
-                log.debug("Already unsubscribed from uuid=%s", uuid)
+                log.debug(
+                    "Already unsubscribed from handle=0x%04x",
+                    value_handle
+                )
 
     def get_handle(self, char_uuid):
         """
@@ -290,35 +231,21 @@ class BLEDevice(object):
                 for callback in self._callbacks[handle]:
                     callback(handle, value)
 
-    def exchange_mtu(self, mtu):
+    def notify_disconnect(self, callback):
         """
-        ATT exchange Maximum Transmission Unit.
-        :param mtu: New MTU-value
-        :return: New MTU, as recognized by server.
+        Register a callback for connection_disconnected packets. This callback
+        has one parameter 'reason' and no return value
         """
-        raise NotImplementedError()
+        self._disconnect_callback = callback
 
-    def resubscribe_all(self):
+    def receive_connection_disconnected(self, reason):
         """
-        Reenable all notifications and indications for uuids that were
-        previously subscribed to.
-        This has to be called after a connection loss and subsequent reconnect.
+        Receive a connection_disconnected event from the connected device
+        and propagate the value to the registered callback.
         """
 
-        for uuid in self._subscribed_uuids:
-            value_handle, characteristic_config_handle = (
-                self._notification_handles(uuid)
-            )
-
-            properties = bytearray([
-                0x2 if self._subscribed_uuids[uuid] else 0x1,
-                0x0
-            ])
-
-            with self._lock:
-                self.char_write_handle(
-                    characteristic_config_handle,
-                    properties,
-                    wait_for_response=True
-                )
-                log.info("Resubscribed to uuid=%s", uuid)
+        log.info('Received a connection_disconnect event with reason=0x%x',
+                 reason)
+        with self._lock:
+            if self._disconnect_callback:
+               self._disconnect_callback(reason)
